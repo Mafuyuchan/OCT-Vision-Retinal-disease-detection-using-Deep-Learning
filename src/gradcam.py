@@ -3,64 +3,93 @@ import torch
 import numpy as np
 import cv2
 
+
 class GradCAM:
     """
-    Minimal Grad-CAM implementation.
+    Minimal + stable Grad-CAM implementation.
     Usage:
         cam = GradCAM(model, target_layer)
-        heatmap = cam(image_tensor, class_idx=None)  # heatmap numpy HxW float32 0..1
-    Notes:
-        - image_tensor shape: (1, C, H, W)
-        - target_layer: the nn.Module to hook (e.g. model.layer4[-1] for ResNet50)
+        heatmap = cam(image_tensor, class_idx=None)
     """
+
     def __init__(self, model: torch.nn.Module, target_layer: torch.nn.Module):
         self.model = model
         self.target_layer = target_layer
         self.gradients = None
         self.activations = None
-        # register hooks
+
+        # Ensure model in eval mode (important for BatchNorm)
+        self.model.eval()
+
+        # Register hooks
         self._register_hooks()
 
     def _register_hooks(self):
         def forward_hook(module, inp, out):
-            # out shape: (N, C, H, W)
-            self.activations = out.detach()
-        def backward_hook(module, grad_in, grad_out):
-            # grad_out[0] shape: (N, C, H, W)
-            self.gradients = grad_out[0].detach()
-        # remove existing hooks if any (not tracked here) — user should create new GradCAM instance per run
-        self.target_layer.register_forward_hook(forward_hook)
-        self.target_layer.register_backward_hook(backward_hook)
+            # out: (N, C, H, W)
+            self.activations = out.detach().cpu()
 
-    def __call__(self, input_tensor: torch.Tensor, class_idx: int = None):
+        def backward_hook(module, grad_in, grad_out):
+            # grad_out[0]: (N, C, H, W)
+            self.gradients = grad_out[0].detach().cpu()
+
+        # Use full backward hook (PyTorch >= 1.12)
+        self.target_layer.register_forward_hook(forward_hook)
+        self.target_layer.register_full_backward_hook(backward_hook)
+
+    def __call__(self, input_tensor: torch.Tensor, class_idx: int = None, upsample_size=None):
         """
         Returns heatmap numpy array scaled 0..1 (H, W)
         """
-        # forward
-        logits = self.model(input_tensor)  # (1, num_classes)
+        # Forward pass
+        logits = self.model(input_tensor)
+
+        # Which class to visualize
         if class_idx is None:
             class_idx = int(logits.argmax(dim=1).item())
 
-        # backward
+        # Backward pass
         self.model.zero_grad()
         loss = logits[0, class_idx]
         loss.backward(retain_graph=True)
 
-        # gradients & activations
+        # Verify hooks captured data
+        if self.gradients is None or self.activations is None:
+            raise RuntimeError(
+                "Gradients or activations not captured. Check target_layer or model hooks."
+            )
+
         grads = self.gradients  # (1, C, H, W)
         acts = self.activations  # (1, C, H, W)
 
-        if grads is None or acts is None:
-            raise RuntimeError("Gradients or activations were not captured. Ensure target_layer is correct.")
-
-        # global-average-pool grads
+        # Global average pooling of gradients → weights
         weights = torch.mean(grads, dim=(2, 3), keepdim=True)  # (1, C, 1, 1)
-        weighted_acts = (weights * acts).sum(dim=1, keepdim=True)  # (1, 1, H, W)
-        heatmap = weighted_acts.squeeze().cpu().numpy()
-        heatmap = np.maximum(heatmap, 0)
-        if heatmap.max() != 0:
-            heatmap = heatmap / heatmap.max()
-        else:
-            heatmap = np.zeros_like(heatmap)
 
-        return heatmap
+        # Weighted sum of activations
+        cam = (weights * acts).sum(dim=1).squeeze().numpy()  # (H, W)
+
+        # ReLU
+        cam = np.maximum(cam, 0)
+
+        # Normalize heatmap
+        cam = cam / cam.max() if cam.max() > 0 else np.zeros_like(cam)
+
+        # Optional upsample
+        if upsample_size is not None:
+            cam = cv2.resize(cam, upsample_size, interpolation=cv2.INTER_LINEAR)
+
+        return cam
+
+    @staticmethod
+    def apply_colormap(heatmap: np.ndarray, image: np.ndarray):
+        """
+        Apply Jet colormap and overlay on the image.
+        image: (H, W, 3) uint8 original image
+        heatmap: (H, W) float32 0..1
+        """
+        heatmap_uint8 = np.uint8(255 * heatmap)
+        heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+
+        overlay = cv2.addWeighted(image, 0.6, heatmap_color, 0.4, 0)
+        return overlay
+
