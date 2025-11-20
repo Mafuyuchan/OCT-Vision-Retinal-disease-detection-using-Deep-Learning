@@ -1,30 +1,69 @@
 import torch
-import os
 from pathlib import Path
 
 
 def save_checkpoint(model, optimizer, epoch, loss, path):
-Path(path).parent.mkdir(parents=True, exist_ok=True)
-state = {
-'model_state_dict': model.state_dict(),
-'optimizer_state_dict': optimizer.state_dict(),
-'epoch': epoch,
-'loss': loss
-}
-torch.save(state, path)
+    """
+    Save model checkpoint.
+
+    Args:
+        model: PyTorch model.
+        optimizer: Optimizer used during training.
+        epoch: Current epoch number.
+        loss: Training loss.
+        path: File path for saving checkpoint.
+    """
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+    state = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "loss": loss
+    }
+
+    torch.save(state, path)
+    print(f"✅ Checkpoint saved at: {path}")
 
 
+def load_checkpoint(path, model, optimizer=None, map_location="cpu"):
+    """
+    Load a model checkpoint.
 
+    Args:
+        path: Path to checkpoint file.
+        model: Model in which weights will be loaded.
+        optimizer: (Optional) optimizer to load state into.
+        map_location: "cpu" or "cuda".
 
-def load_checkpoint(path, model, optimizer=None, map_location=None):
-state = torch.load(path, map_location=map_location)
-model.load_state_dict(state['model_state_dict'])
-if optimizer and 'optimizer_state_dict' in state:
-optimizer.load_state_dict(state['optimizer_state_dict'])
-return state
+    Returns:
+        Loaded checkpoint dictionary.
+    """
 
+    if not Path(path).exists():
+        raise FileNotFoundError(f"❌ Checkpoint not found at {path}")
 
+    state = torch.load(path, map_location=map_location)
+
+    model.load_state_dict(state["model_state_dict"])
+
+    if optimizer and "optimizer_state_dict" in state:
+        optimizer.load_state_dict(state["optimizer_state_dict"])
+
+    print(f"✅ Loaded checkpoint from: {path}")
+    print(f"➡ Epoch: {state.get('epoch', 'Unknown')}, Loss: {state.get('loss', 'Unknown')}")
+
+    return state
 
 
 def count_parameters(model):
-return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    """
+    Count trainable parameters in a model.
+    
+    Args:
+        model: PyTorch model.
+
+    Returns:
+        int: Number of trainable parameters.
+    """
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
